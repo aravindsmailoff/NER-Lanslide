@@ -2,10 +2,7 @@ export const AUTHORITY_SESSION_COOKIE = 'ner-authority-session'
 export const DEMO_SESSION_VALUE = 'authenticated-authority-demo'
 
 export function isValidAuthorityCredential(email: string, password: string) {
-  const cleanEmail = email.trim().toLowerCase()
-  if (cleanEmail === 'officer@example.gov' && password === 'demo-password') return true
-  // In demo / prototype mode, allow standard officer logins
-  return cleanEmail.length > 3 && password.length >= 4
+  return email.trim().toLowerCase() === 'officer@example.gov' && password === 'demo-password'
 }
 
 export function authoritySessionCookie(value = DEMO_SESSION_VALUE) {
