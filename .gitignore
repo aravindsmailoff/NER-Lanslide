@@ -1,0 +1,38 @@
+﻿# Dependencies
+node_modules/
+**/node_modules/
+
+# Next.js build
+.next/
+**/.next/
+out/
+**/.out/
+
+# Android / Mobile builds
+*.apk
+*.aab
+.gradle/
+**/.gradle/
+.kotlin/
+**/.kotlin/
+build/
+**/build/
+local.properties
+**/local.properties
+*.keystore
+!debug.keystore
+.cxx/
+**/.cxx/
+
+# IDE files
+.idea/
+**/.idea/
+*.iml
+
+# Environment & local files
+.env*.local
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
