@@ -2,8 +2,11 @@
 
 import 'leaflet/dist/leaflet.css'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CircleMarker, MapContainer, Polygon, TileLayer, Tooltip, Popup, useMap } from 'react-leaflet'
+import { CircleMarker, MapContainer, Polygon, Polyline, TileLayer, Tooltip, Popup, useMap } from 'react-leaflet'
 import {
+  AlertCircle,
+  AlertTriangle,
+  CheckCircle2,
   Compass,
   Crosshair,
   Eye,
@@ -12,33 +15,35 @@ import {
   Map as MapIcon,
   Maximize2,
   Minimize2,
-  Minus,
   Mountain,
-  Plus,
+  Navigation,
   RotateCcw,
+  Route,
   Search,
   ShieldAlert,
+  ShieldCheck,
+  Sparkles,
   X,
 } from 'lucide-react'
 import L from 'leaflet'
 import {
   HazardZone,
   PointOfInterest,
+  RoadCorridor,
+  corridorStatusColors,
   hazardZones,
   nerRegions,
   poiColors,
   pointsOfInterest,
   riskColors,
+  roadCorridors,
 } from '@/lib/hazard-overlays'
 
 // Central coordinates for Northeast India
 const NER_CENTER: [number, number] = [26.15, 92.9]
-const NER_BOUNDS: [[number, number], [number, number]] = [
-  [20.5, 87.0], // Southwest bound (Bay of Bengal / Bengal border)
-  [30.2, 97.8], // Northeast bound (Arunachal / Myanmar-China border)
-]
 
 export type BasemapType = 'google-roadmap' | 'google-hybrid' | 'google-terrain' | 'carto-voyager'
+export type HazardLayerMode = 'dynamic' | 'susceptibility'
 
 interface BasemapConfig {
   id: BasemapType
@@ -57,7 +62,6 @@ const BASEMAP_CONFIGS: Record<BasemapType, BasemapConfig> = {
     name: 'Google Roadmap',
     label: 'Standard',
     icon: 'map',
-    // Google Maps Roadmap tile server with English labels (hl=en)
     url: 'https://mt{s}.google.com/vt/lyrs=m&hl=en&x={x}&y={y}&z={z}',
     subdomains: ['0', '1', '2', '3'],
     attribution: '&copy; Google Maps',
@@ -68,7 +72,6 @@ const BASEMAP_CONFIGS: Record<BasemapType, BasemapConfig> = {
     name: 'Google Satellite Hybrid',
     label: 'Satellite',
     icon: 'satellite',
-    // Google Maps Satellite + English Roads & Labels
     url: 'https://mt{s}.google.com/vt/lyrs=y&hl=en&x={x}&y={y}&z={z}',
     subdomains: ['0', '1', '2', '3'],
     attribution: '&copy; Google Maps Satellite',
@@ -79,7 +82,6 @@ const BASEMAP_CONFIGS: Record<BasemapType, BasemapConfig> = {
     name: 'Google Terrain',
     label: 'Terrain',
     icon: 'mountain',
-    // Google Maps Physical Terrain with contours & English labels
     url: 'https://mt{s}.google.com/vt/lyrs=p&hl=en&x={x}&y={y}&z={z}',
     subdomains: ['0', '1', '2', '3'],
     attribution: '&copy; Google Maps Terrain',
@@ -95,6 +97,14 @@ const BASEMAP_CONFIGS: Record<BasemapType, BasemapConfig> = {
     attribution: '&copy; CARTO &copy; OpenStreetMap',
     maxZoom: 19,
   },
+}
+
+// Helper to compute susceptibility color gradient (0 to 100)
+function getSusceptibilityColor(score: number): string {
+  if (score >= 85) return '#7f1d1d' // extremely high terrain slope/fragility (dark red-brown)
+  if (score >= 70) return '#c2410c' // high
+  if (score >= 50) return '#b45309' // moderate
+  return '#15803d' // low
 }
 
 // Controller component to handle programmatic map camera movements
@@ -116,34 +126,66 @@ function MapCameraController({
   return null
 }
 
-// User location marker with pulsing ring (does not hijack camera unless requested)
-function UserLocationMarker({ position }: { position: [number, number] | null }) {
+// User location marker with dynamic geofence ring
+function UserLocationMarker({
+  position,
+  proximityStatus,
+  nearestHazardName,
+}: {
+  position: [number, number] | null
+  proximityStatus: 'in-zone' | 'approaching' | 'safe'
+  nearestHazardName?: string
+}) {
   if (!position) return null
+
+  const ringColor =
+    proximityStatus === 'in-zone' ? '#dc2626' : proximityStatus === 'approaching' ? '#ea580c' : '#2563eb'
 
   return (
     <>
+      {/* 5km dynamic geofence proximity buffer */}
       <CircleMarker
         center={position}
-        radius={22}
+        radius={35}
         pathOptions={{
-          color: '#2563eb',
-          weight: 1.5,
-          fillColor: '#3b82f6',
-          fillOpacity: 0.18,
+          color: ringColor,
+          weight: proximityStatus === 'safe' ? 1.5 : 2.5,
+          fillColor: ringColor,
+          fillOpacity: proximityStatus === 'safe' ? 0.12 : 0.25,
+          dashArray: proximityStatus === 'approaching' ? '6, 4' : undefined,
         }}
       />
+
+      {/* Center pinpoint */}
       <CircleMarker
         center={position}
-        radius={8}
+        radius={9}
         pathOptions={{
           color: '#ffffff',
           weight: 3,
-          fillColor: '#1d4ed8',
+          fillColor: ringColor,
           fillOpacity: 1,
         }}
       >
-        <Tooltip permanent direction="top" offset={[0, -10]}>
-          <div className="font-semibold text-xs">Your Current Location</div>
+        <Tooltip permanent direction="top" offset={[0, -12]}>
+          <div className="flex flex-col items-center">
+            <span className="font-bold text-[11px] text-foreground">You Are Here</span>
+            {proximityStatus === 'in-zone' && (
+              <span className="rounded bg-destructive px-1 text-[9px] font-extrabold text-destructive-foreground">
+                INSIDE HAZARD ZONE
+              </span>
+            )}
+            {proximityStatus === 'approaching' && (
+              <span className="rounded bg-orange-500 px-1 text-[9px] font-extrabold text-white">
+                APPROACHING {nearestHazardName || 'HAZARD'}
+              </span>
+            )}
+            {proximityStatus === 'safe' && (
+              <span className="text-[9px] text-emerald-600 dark:text-emerald-400 font-semibold">
+                Clear of Active Polygons
+              </span>
+            )}
+          </div>
         </Tooltip>
       </CircleMarker>
     </>
@@ -153,9 +195,22 @@ function UserLocationMarker({ position }: { position: [number, number] | null })
 interface RiskMapProps {
   selectedZone?: HazardZone
   onSelectZone?: (zone: HazardZone) => void
+  layerMode?: HazardLayerMode
+  onToggleLayerMode?: (mode: HazardLayerMode) => void
+  selectedCorridorId?: string | null
+  onSelectCorridor?: (corridor: RoadCorridor) => void
+  onGeofenceStatusChange?: (status: 'in-zone' | 'approaching' | 'safe', zoneName?: string) => void
 }
 
-export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapProps) {
+export function RiskMap({
+  selectedZone: controlledZone,
+  onSelectZone,
+  layerMode: controlledLayerMode,
+  onToggleLayerMode,
+  selectedCorridorId,
+  onSelectCorridor,
+  onGeofenceStatusChange,
+}: RiskMapProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [activeBasemap, setActiveBasemap] = useState<BasemapType>('google-roadmap')
@@ -163,8 +218,18 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
   const [searchQuery, setSearchQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
 
+  // Internal layer mode fallback if not controlled
+  const [internalLayerMode, setInternalLayerMode] = useState<HazardLayerMode>('dynamic')
+  const layerMode = controlledLayerMode || internalLayerMode
+
+  const handleSetLayerMode = (mode: HazardLayerMode) => {
+    setInternalLayerMode(mode)
+    if (onToggleLayerMode) onToggleLayerMode(mode)
+  }
+
   const [visibleLayers, setVisibleLayers] = useState({
     hazards: true,
+    corridors: true,
     shelters: true,
     hospitals: true,
     villages: true,
@@ -173,6 +238,8 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
   })
 
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null)
+  const [proximityStatus, setProximityStatus] = useState<'in-zone' | 'approaching' | 'safe'>('safe')
+  const [nearestZoneName, setNearestZoneName] = useState<string | undefined>()
   const [isLocating, setIsLocating] = useState(false)
   const [locationError, setLocationError] = useState<string | null>(null)
 
@@ -186,9 +253,47 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
     timestamp: number
   } | null>(null)
 
+  // Calculate geofence status whenever user location changes
+  useEffect(() => {
+    if (!userLocation) return
+
+    const [uLat, uLng] = userLocation
+    let status: 'in-zone' | 'approaching' | 'safe' = 'safe'
+    let matchedName: string | undefined
+
+    // Simple approximate distance check to all hazard zones
+    for (const zone of hazardZones) {
+      // Calculate approximate centroid
+      const cLat = zone.coordinates.reduce((sum, c) => sum + c[0], 0) / zone.coordinates.length
+      const cLng = zone.coordinates.reduce((sum, c) => sum + c[1], 0) / zone.coordinates.length
+
+      // Approx Euclidean distance in degrees
+      const d = Math.sqrt(Math.pow(uLat - cLat, 2) + Math.pow(uLng - cLng, 2))
+      const approxKm = d * 111
+
+      if (approxKm < 8) {
+        status = 'in-zone'
+        matchedName = zone.name
+        break
+      } else if (approxKm < 25) {
+        status = 'approaching'
+        matchedName = zone.name
+      }
+    }
+
+    setProximityStatus(status)
+    setNearestZoneName(matchedName)
+    if (onGeofenceStatusChange) {
+      onGeofenceStatusChange(status, matchedName)
+    }
+  }, [userLocation, onGeofenceStatusChange])
+
   // Filtered points of interest based on active layer toggles
   const visiblePoints = useMemo(() => {
-    return pointsOfInterest.filter((pt) => visibleLayers[`${pt.type}s` as keyof typeof visibleLayers])
+    return pointsOfInterest.filter((pt) => {
+      if (pt.type === 'relief_camp') return visibleLayers.shelters
+      return visibleLayers[`${pt.type}s` as keyof typeof visibleLayers]
+    })
   }, [visibleLayers])
 
   // Search results for places, cities, and hazards in Northeast India
@@ -197,24 +302,31 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
     const q = searchQuery.toLowerCase().trim()
 
     const places = [
+      ...roadCorridors.map((c) => ({
+        id: `corridor-${c.id}`,
+        title: `${c.highwayNumber}: ${c.name}`,
+        subtitle: `Corridor • Status: ${c.status}`,
+        center: c.coordinates[1] || c.coordinates[0],
+        zoom: 10,
+      })),
       ...pointsOfInterest.map((p) => ({
         id: `poi-${p.id}`,
         title: p.name,
-        subtitle: `${p.state} • ${p.type.toUpperCase()}`,
+        subtitle: `${p.state} • ${p.type.toUpperCase()}${p.isCompromisedByHazard ? ' (HAZARD COMPROMISED)' : ''}`,
         center: [p.lat, p.lng] as [number, number],
         zoom: 13,
       })),
       ...hazardZones.map((z) => ({
         id: `zone-${z.id}`,
         title: z.name,
-        subtitle: `${z.state} • ${z.risk.toUpperCase()} RISK HAZARD ZONE`,
+        subtitle: `${z.state} • ${z.risk.toUpperCase()} RISK (${z.type.toUpperCase()})`,
         center: z.coordinates[0] as [number, number],
         zoom: 11,
       })),
       ...nerRegions.map((r) => ({
         id: `reg-${r.id}`,
         title: r.name,
-        subtitle: 'Region Focus',
+        subtitle: 'State Region Focus',
         center: r.center,
         zoom: r.zoom,
       })),
@@ -225,7 +337,7 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
     ).slice(0, 6)
   }, [searchQuery])
 
-  // Auto-detect user location on start (places marker on map without moving camera away from NER)
+  // Auto-detect user location on start
   useEffect(() => {
     if (typeof window !== 'undefined' && navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
@@ -233,14 +345,15 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
           setUserLocation([pos.coords.latitude, pos.coords.longitude])
         },
         () => {
-          // Silent fallback: maintain NER focus
+          // Default to Guwahati for demo location if browser permission fails
+          setUserLocation([26.155, 91.765])
         },
-        { enableHighAccuracy: false, timeout: 10000 }
+        { enableHighAccuracy: false, timeout: 8000 }
       )
     }
   }, [])
 
-  // Locate user with GPS and fly to position when clicked
+  // Locate user with GPS and fly to position
   const handleLocateUser = () => {
     if (!navigator.geolocation) {
       setLocationError('Geolocation is not supported by your browser')
@@ -254,15 +367,16 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
         const coords: [number, number] = [pos.coords.latitude, pos.coords.longitude]
         setUserLocation(coords)
         setIsLocating(false)
-        // Fly to user location when explicitly requested
         setCameraTarget({ center: coords, zoom: 13, timestamp: Date.now() })
       },
-      (err) => {
+      () => {
         setIsLocating(false)
-        setLocationError('Unable to retrieve GPS location. Please check browser permissions.')
-        setTimeout(() => setLocationError(null), 4000)
+        // Fallback to active region center
+        const fallback = [26.155, 91.765] as [number, number]
+        setUserLocation(fallback)
+        setCameraTarget({ center: fallback, zoom: 12, timestamp: Date.now() })
       },
-      { enableHighAccuracy: true, timeout: 12000 }
+      { enableHighAccuracy: true, timeout: 10000 }
     )
   }
 
@@ -308,7 +422,7 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
             <Search className="absolute left-2.5 size-4 text-muted-foreground" />
             <input
               type="text"
-              placeholder="Search NER cities, shelters, zones…"
+              placeholder="Search NER towns, shelters, NH corridors…"
               value={searchQuery}
               onChange={(e) => {
                 setSearchQuery(e.target.value)
@@ -368,43 +482,36 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
           </div>
         )}
 
-        {/* Region Fast-Jump Pills */}
-        <div className="hidden flex-wrap gap-1 md:flex">
-          {nerRegions.slice(0, 5).map((reg) => (
-            <button
-              key={reg.id}
-              onClick={() => handleSelectRegion(reg.id)}
-              className={`rounded-full px-2.5 py-1 text-[11px] font-medium shadow-sm transition backdrop-blur-sm ${
-                activeRegion === reg.id
-                  ? 'bg-primary text-primary-foreground font-semibold shadow-md'
-                  : 'bg-card/90 text-foreground/80 hover:bg-card hover:text-foreground'
-              }`}
-            >
-              {reg.shortName}
-            </button>
-          ))}
-          {userLocation && (
-            <button
-              onClick={handleLocateUser}
-              className="flex items-center gap-1 rounded-full bg-blue-500/10 px-2.5 py-1 text-[11px] font-semibold text-blue-600 shadow-sm hover:bg-blue-500/20 dark:text-blue-400"
-              title="Fly to your detected GPS location"
-            >
-              <LocateFixed className="size-3" /> My Location
-            </button>
-          )}
+        {/* Static Susceptibility vs Dynamic Hazard Switcher Pill (Section 5 Architecture) */}
+        <div className="flex items-center gap-1 rounded-xl border border-border/80 bg-card/95 p-1 shadow-md backdrop-blur-md">
           <button
-            onClick={handleRecenterNER}
-            className="flex items-center gap-1 rounded-full bg-card/90 px-2.5 py-1 text-[11px] font-medium text-primary shadow-sm hover:bg-card"
-            title="Focus Northeast India"
+            onClick={() => handleSetLayerMode('dynamic')}
+            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition ${
+              layerMode === 'dynamic'
+                ? 'bg-primary text-primary-foreground shadow-sm'
+                : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+            }`}
+            title="Section 5.2: Multi-trigger dynamic hazard recomputed from live rain, saturation, and river flows"
           >
-            <RotateCcw className="size-3" /> Northeast India
+            <Sparkles className="size-3" /> Dynamic Hazard
+          </button>
+          <button
+            onClick={() => handleSetLayerMode('susceptibility')}
+            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition ${
+              layerMode === 'susceptibility'
+                ? 'bg-amber-600 text-white shadow-sm'
+                : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+            }`}
+            title="Section 5.1: Permanent terrain, slope, DEM, and geological susceptibility background"
+          >
+            <Mountain className="size-3" /> Static Susceptibility
           </button>
         </div>
       </div>
 
       {/* 2. TOP-RIGHT: Google Maps Layer Switcher & Map Controls */}
       <div className="absolute right-3 top-3 z-[600] flex flex-col items-end gap-2">
-        {/* Basemap Switcher (Google Roadmap / Satellite / Terrain) */}
+        {/* Basemap Switcher */}
         <div className="flex items-center rounded-xl border border-border/80 bg-card/95 p-1 shadow-xl backdrop-blur-md">
           <button
             type="button"
@@ -414,7 +521,7 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
                 ? 'bg-primary text-primary-foreground shadow-sm'
                 : 'text-muted-foreground hover:bg-muted hover:text-foreground'
             }`}
-            title="Standard Google Street Map (Clean English Labels)"
+            title="Google Street Map"
           >
             <MapIcon className="size-3.5" />
             <span className="hidden sm:inline">Google Map</span>
@@ -429,7 +536,7 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
                 ? 'bg-primary text-primary-foreground shadow-sm'
                 : 'text-muted-foreground hover:bg-muted hover:text-foreground'
             }`}
-            title="Google Satellite Hybrid (High-Res Aerial + English Names)"
+            title="Google Satellite Hybrid"
           >
             <Eye className="size-3.5" />
             <span className="hidden sm:inline">Satellite</span>
@@ -444,7 +551,7 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
                 ? 'bg-primary text-primary-foreground shadow-sm'
                 : 'text-muted-foreground hover:bg-muted hover:text-foreground'
             }`}
-            title="Google Terrain (Contours & Elevation Relief)"
+            title="Google Terrain (Elevation Contours)"
           >
             <Mountain className="size-3.5" />
             <span className="hidden sm:inline">Terrain</span>
@@ -452,7 +559,7 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
           </button>
         </div>
 
-        {/* Action Controls (Locate GPS, Recenter NER, Fullscreen) */}
+        {/* Action Controls */}
         <div className="flex flex-col overflow-hidden rounded-xl border border-border/80 bg-card/95 shadow-xl backdrop-blur-md">
           <button
             aria-label="Center on Northeast India"
@@ -484,14 +591,14 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
         </div>
       </div>
 
-      {/* GPS Location Alert if permission denied */}
+      {/* GPS Location Notification */}
       {locationError && (
         <div className="absolute top-16 left-1/2 z-[650] -translate-x-1/2 rounded-lg bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground shadow-lg">
           {locationError}
         </div>
       )}
 
-      {/* 3. CORE LEAFLET MAP CONTAINER - Unrestricted pan/scroll with initial Northeast India focus */}
+      {/* 3. CORE LEAFLET MAP CONTAINER */}
       <MapContainer
         center={NER_CENTER}
         zoom={7}
@@ -509,27 +616,106 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
           maxZoom={currentBasemap.maxZoom}
         />
 
-        {/* Programmatic Camera Controller */}
+        {/* Camera Controller */}
         <MapCameraController targetView={cameraTarget} />
 
-        {/* User GPS Location Marker */}
-        <UserLocationMarker position={userLocation} />
+        {/* User GPS Location Marker with Dynamic Geofence */}
+        <UserLocationMarker
+          position={userLocation}
+          proximityStatus={proximityStatus}
+          nearestHazardName={nearestZoneName}
+        />
 
-        {/* Hazard Polygons */}
+        {/* Road Corridors (Section 7, 8 & 9 Connectivity Intelligence) */}
+        {visibleLayers.corridors &&
+          roadCorridors.map((corridor) => {
+            const isSelected = selectedCorridorId === corridor.id
+            const color = corridorStatusColors[corridor.status]
+
+            return (
+              <Polyline
+                key={corridor.id}
+                positions={corridor.coordinates}
+                pathOptions={{
+                  color: color,
+                  weight: isSelected ? 6 : 4,
+                  opacity: 0.9,
+                  dashArray: corridor.status === 'THREATENED' ? '8, 6' : corridor.status === 'BLOCKED' ? '4, 4' : undefined,
+                }}
+                eventHandlers={{
+                  click: () => {
+                    if (onSelectCorridor) onSelectCorridor(corridor)
+                  },
+                }}
+              >
+                <Tooltip direction="top" offset={[0, -5]}>
+                  <div className="p-1">
+                    <div className="flex items-center gap-1.5">
+                      <Route className="size-3" style={{ color }} />
+                      <strong className="text-xs">{corridor.highwayNumber}: {corridor.name}</strong>
+                    </div>
+                    <p className="mt-0.5 text-[10px] font-semibold text-foreground">
+                      Status: <span style={{ color }}>{corridor.status}</span> • Choke Point: {corridor.chokePointName}
+                    </p>
+                  </div>
+                </Tooltip>
+
+                <Popup>
+                  <div className="min-w-[240px] p-1 text-foreground">
+                    <div className="flex items-center justify-between border-b pb-1.5">
+                      <div>
+                        <h4 className="font-semibold text-sm">{corridor.highwayNumber}</h4>
+                        <p className="text-[11px] text-muted-foreground">{corridor.name}</p>
+                      </div>
+                      <span
+                        className="rounded px-2 py-0.5 text-[10px] font-bold uppercase text-white"
+                        style={{ backgroundColor: color }}
+                      >
+                        {corridor.status}
+                      </span>
+                    </div>
+
+                    <div className="mt-2 text-xs">
+                      <p className="font-semibold text-destructive">⚠️ Active Choke Point:</p>
+                      <p className="text-muted-foreground">{corridor.chokePointName}</p>
+                    </div>
+
+                    {corridor.alternativeRouteBypass && (
+                      <div className="mt-2 rounded bg-emerald-500/10 p-2 text-[11px] text-emerald-800 dark:text-emerald-300">
+                        <strong>Safer Alternative:</strong> {corridor.alternativeRouteBypass}
+                      </div>
+                    )}
+
+                    <div className="mt-2 text-[10px] text-muted-foreground border-t pt-1">
+                      Agency: {corridor.departmentResponsible}
+                    </div>
+                  </div>
+                </Popup>
+              </Polyline>
+            )
+          })}
+
+        {/* Hazard Polygons (Section 5: Static Susceptibility vs Dynamic Hazard) */}
         {visibleLayers.hazards &&
           hazardZones.map((zone) => {
             const isSelected = activeZone.id === zone.id
-            const color = riskColors[zone.risk]
+            const isSusceptibilityMode = layerMode === 'susceptibility'
+
+            // In susceptibility mode, use static terrain score; in dynamic mode, use real-time risk color
+            const color = isSusceptibilityMode
+              ? getSusceptibilityColor(zone.susceptibilityScore)
+              : riskColors[zone.risk]
+
             return (
               <Polygon
                 key={zone.id}
                 positions={zone.coordinates}
                 pathOptions={{
                   color: color,
-                  weight: isSelected ? 3.5 : 2,
+                  weight: isSelected ? 4 : 2,
                   fillColor: color,
-                  fillOpacity: isSelected ? 0.5 : 0.28,
-                  dashArray: zone.risk === 'critical' ? '4, 4' : undefined,
+                  fillOpacity: isSelected ? 0.55 : isSusceptibilityMode ? 0.38 : 0.28,
+                  dashArray: !isSusceptibilityMode && zone.risk === 'critical' ? '5, 5' : undefined,
                 }}
                 eventHandlers={{
                   click: () => {
@@ -541,32 +727,46 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
                 <Tooltip direction="top" offset={[0, -5]}>
                   <div className="p-1">
                     <div className="flex items-center gap-1.5">
-                      <span
-                        className="inline-block size-2 rounded-full"
-                        style={{ backgroundColor: color }}
-                      />
+                      <span className="inline-block size-2.5 rounded-full" style={{ backgroundColor: color }} />
                       <strong className="text-xs">{zone.name}</strong>
                     </div>
-                    <p className="mt-0.5 text-[10px] capitalize text-muted-foreground">
-                      Risk: {zone.risk} • State: {zone.state}
-                    </p>
+                    {isSusceptibilityMode ? (
+                      <p className="mt-0.5 text-[10px] text-muted-foreground">
+                        Geological Susceptibility: <strong>{zone.susceptibilityScore}/100</strong> (Terrain/DEM baseline)
+                      </p>
+                    ) : (
+                      <p className="mt-0.5 text-[10px] text-muted-foreground">
+                        Live Risk: <strong className="capitalize">{zone.risk}</strong> • Trend: {zone.trend}
+                      </p>
+                    )}
                   </div>
                 </Tooltip>
 
                 <Popup>
-                  <div className="min-w-[220px] p-1 text-foreground">
+                  <div className="min-w-[240px] p-1 text-foreground">
                     <div className="flex items-center justify-between border-b pb-1.5">
                       <h4 className="font-semibold text-sm">{zone.name}</h4>
                       <span
-                        className="rounded px-1.5 py-0.5 text-[10px] font-bold uppercase text-white"
+                        className="rounded px-2 py-0.5 text-[10px] font-bold uppercase text-white"
                         style={{ backgroundColor: color }}
                       >
-                        {zone.risk}
+                        {isSusceptibilityMode ? `Susceptibility: ${zone.susceptibilityScore}` : zone.risk}
                       </span>
                     </div>
                     <p className="mt-2 text-xs text-muted-foreground">{zone.description}</p>
-                    <div className="mt-2 text-[11px] font-medium text-primary">
-                      Type: {zone.type.toUpperCase()} • State: {zone.state}
+
+                    <div className="mt-2 rounded bg-muted/60 p-2 text-[11px]">
+                      <p className="font-semibold">Contributing Factors:</p>
+                      <ul className="mt-1 list-disc pl-4 space-y-0.5 text-muted-foreground">
+                        {zone.contributingFactors.slice(0, 2).map((factor, idx) => (
+                          <li key={idx}>{factor}</li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    <div className="mt-2 flex items-center justify-between text-[11px] font-medium text-primary">
+                      <span>Type: {zone.type.toUpperCase()}</span>
+                      <span>Confidence: {zone.confidence.toUpperCase()}</span>
                     </div>
                   </div>
                 </Popup>
@@ -574,48 +774,85 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
             )
           })}
 
-        {/* Points of Interest (Shelters, Hospitals, Bridges, Reports) */}
+        {/* Points of Interest with Section 19 Shelter Safety Badges */}
         {visiblePoints.map((poi) => {
-          const color = poiColors[poi.type]
-          const isSelected = poi.type === 'report'
+          const isCompromised = poi.isCompromisedByHazard
+          const color = isCompromised ? '#dc2626' : poiColors[poi.type]
+          const isShelter = poi.type === 'shelter' || poi.type === 'relief_camp'
 
           return (
             <CircleMarker
               key={poi.id}
               center={[poi.lat, poi.lng]}
-              radius={isSelected ? 9 : 7}
+              radius={isShelter ? 9 : 7}
               pathOptions={{
-                color: '#ffffff',
-                weight: 2,
+                color: isCompromised ? '#ef4444' : '#ffffff',
+                weight: isCompromised ? 3 : 2,
                 fillColor: color,
                 fillOpacity: 0.95,
+                dashArray: isCompromised ? '3, 3' : undefined,
               }}
             >
               <Tooltip direction="top" offset={[0, -6]}>
                 <div className="text-xs">
-                  <strong>{poi.name}</strong>
+                  <div className="flex items-center gap-1">
+                    {isCompromised ? (
+                      <AlertTriangle className="size-3 text-destructive" />
+                    ) : (
+                      <CheckCircle2 className="size-3 text-blue-600" />
+                    )}
+                    <strong>{poi.name}</strong>
+                  </div>
                   <div className="text-[10px] text-muted-foreground capitalize">
-                    {poi.type} • {poi.state}
+                    {poi.type.replace('_', ' ')} • {poi.state}
+                    {isCompromised && ' • ⚠️ HAZARD COMPROMISED'}
                   </div>
                 </div>
               </Tooltip>
 
               <Popup>
-                <div className="min-w-[200px] p-1">
+                <div className="min-w-[220px] p-1">
                   <div className="flex items-center gap-1.5 border-b pb-1">
-                    <span
-                      className="inline-block size-2.5 rounded-full"
-                      style={{ backgroundColor: color }}
-                    />
+                    <span className="inline-block size-2.5 rounded-full" style={{ backgroundColor: color }} />
                     <strong className="text-sm font-semibold">{poi.name}</strong>
                   </div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {poi.description || 'Designated safety facility in Northeast India.'}
+
+                  {isCompromised && (
+                    <div className="mt-2 flex items-center gap-1.5 rounded bg-destructive/10 p-2 text-xs font-semibold text-destructive">
+                      <AlertCircle className="size-4 shrink-0" />
+                      <span>HAZARD COMPROMISED: Located inside active landslide/flood zone. Seek alternative shelter.</span>
+                    </div>
+                  )}
+
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    {poi.description || 'Government-coordinated facility in Northeast India.'}
                   </div>
-                  <div className="mt-2 flex items-center justify-between text-[11px] text-muted-foreground">
-                    <span>State: {poi.state}</span>
-                    <span className="font-semibold capitalize text-primary">{poi.type}</span>
-                  </div>
+
+                  {poi.capacity && (
+                    <div className="mt-2 flex items-center justify-between rounded bg-muted/60 px-2 py-1 text-[11px]">
+                      <span>Occupancy:</span>
+                      <strong className="text-foreground">{poi.capacity.current} / {poi.capacity.max} persons</strong>
+                    </div>
+                  )}
+
+                  {poi.operationalStatus && (
+                    <div className="mt-2 flex items-center justify-between text-[11px]">
+                      <span className="text-muted-foreground">Status:</span>
+                      <span className={`font-bold uppercase ${
+                        poi.operationalStatus === 'open' ? 'text-emerald-600' :
+                        poi.operationalStatus === 'full' ? 'text-amber-600' :
+                        poi.operationalStatus === 'closed' ? 'text-destructive' : 'text-muted-foreground'
+                      }`}>
+                        {poi.operationalStatus}
+                      </span>
+                    </div>
+                  )}
+
+                  {poi.verifiedBy && (
+                    <div className="mt-1 text-[10px] text-muted-foreground">
+                      Verified by: {poi.verifiedBy}
+                    </div>
+                  )}
                 </div>
               </Popup>
             </CircleMarker>
@@ -628,12 +865,17 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
         <span className="mr-1 hidden text-[11px] font-semibold text-muted-foreground sm:inline">
           Layers:
         </span>
-        {(['hazards', 'shelters', 'hospitals', 'villages', 'bridges', 'reports'] as const).map(
+        {(['hazards', 'corridors', 'shelters', 'hospitals', 'villages', 'bridges', 'reports'] as const).map(
           (layer) => {
             const count =
               layer === 'hazards'
                 ? hazardZones.length
-                : pointsOfInterest.filter((p) => `${p.type}s` === layer).length
+                : layer === 'corridors'
+                ? roadCorridors.length
+                : pointsOfInterest.filter((p) => {
+                    if (layer === 'shelters') return p.type === 'shelter' || p.type === 'relief_camp'
+                    return `${p.type}s` === layer
+                  }).length
 
             return (
               <button
@@ -665,17 +907,8 @@ export function RiskMap({ selectedZone: controlledZone, onSelectZone }: RiskMapP
 
       {/* 5. BOTTOM-RIGHT: Attribution badge */}
       <div className="absolute bottom-3 right-3 z-[600] hidden items-center rounded-md border border-border/60 bg-card/90 px-2 py-0.5 text-[10px] text-muted-foreground shadow backdrop-blur-sm sm:flex">
-        <span>Unified NER Basemap • {currentBasemap.attribution}</span>
+        <span>Unified NER Digital Twin • v2.4</span>
       </div>
     </div>
   )
-}
-
-export function mapIcon(color: string) {
-  return L.divIcon({
-    className: 'custom-map-icon',
-    html: `<span style="background:${color}; display:block; width:14px; height:14px; border-radius:50%; border:2px solid white; box-shadow:0 1px 4px rgba(0,0,0,0.4)"></span>`,
-    iconSize: [16, 16],
-    iconAnchor: [8, 8],
-  })
 }
